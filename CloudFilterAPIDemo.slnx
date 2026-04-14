@@ -1,0 +1,10 @@
+<Solution>
+  <Configurations>
+    <Platform Name="Any CPU" />
+    <Platform Name="x64" />
+    <Platform Name="x86" />
+  </Configurations>
+  <Project Path="cfAPINativeEngine/cfAPINativeEngine.vcxproj" Id="3bb4fe4c-032d-450d-a196-590eec737166" />
+  <Project Path="CFAPIWrapper/CFAPIWrapper.vcxproj" />
+  <Project Path="CFWPFUI/CFWPFUI.csproj" Id="af123d6e-c0ae-4675-9893-f4d40795cf72" />
+</Solution>
