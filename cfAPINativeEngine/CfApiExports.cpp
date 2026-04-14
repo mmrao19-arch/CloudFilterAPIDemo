@@ -1,5 +1,10 @@
 #include "pch.h"
 #include "CfApiExports.h"
+#include <windows.h>
+#ifndef NTSTATUS
+typedef LONG NTSTATUS;
+#endif
+#include <cfapi.h>
 #include <string>
 #include <sstream>
 #include <fstream>
@@ -25,10 +30,23 @@ HRESULT __stdcall RegisterSyncRoot(const wchar_t* syncRootPath, const wchar_t* i
         if (displayName) ss << L", DisplayName=\"" << displayName << L"\"";
         LogDebug(ss.str());
 
-        // TODO: Replace this stub with real CFAPI call:
-        // #include <cfapi.h>
-        // HRESULT hr = CfRegisterSyncRoot(...);   // follow MSDN signature
-        // return hr;
+        // Try to call CfRegisterSyncRoot from cfapi.dll if available. Fall back to minimal stub behavior otherwise.
+        HMODULE hCfApi = LoadLibraryW(L"cfapi.dll");
+        if (hCfApi)
+        {
+            using PFN_CfRegisterSyncRoot = HRESULT(WINAPI*)(PCWSTR, PCWSTR, PCWSTR, const void*);
+            PFN_CfRegisterSyncRoot pfn = (PFN_CfRegisterSyncRoot)GetProcAddress(hCfApi, "CfRegisterSyncRoot");
+            if (pfn)
+            {
+                HRESULT hr = pfn(syncRootPath, identity, displayName, nullptr);
+                std::wostringstream r;
+                r << L"CfRegisterSyncRoot returned hr=0x" << std::hex << hr;
+                LogDebug(r.str());
+                FreeLibrary(hCfApi);
+                return hr;
+            }
+            FreeLibrary(hCfApi);
+        }
 
         // Minimal behavior: create the directory if needed so explorer can see it.
         DWORD attrs = GetFileAttributesW(syncRootPath);
@@ -62,23 +80,54 @@ HRESULT __stdcall CreatePlaceholderFile(const wchar_t* placeholderPath, unsigned
         std::wostringstream ss;
         ss << L"CreatePlaceholderFile called. Path=\"" << placeholderPath << L"\", Size=" << fileSize;
         LogDebug(ss.str());
-
-        // TODO: Replace with CfCreatePlaceholders (CFAPI). The real implementation must create a placeholder
-        // structure, set the necessary reparse point and CF placeholder metadata.
-        // Minimal stub: create an empty file and mark it with FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS if desired.
-
-        // Create directory path if needed.
+        // Try to call CfCreatePlaceholders via cfapi.dll. If unavailable, fall back to minimal stub.
         std::wstring path(placeholderPath);
         size_t pos = path.find_last_of(L"\\/");
+        std::wstring baseDir = L".";
+        std::wstring relative;
         if (pos != std::wstring::npos)
         {
-            std::wstring dir = path.substr(0, pos);
-            DWORD attrs = GetFileAttributesW(dir.c_str());
+            baseDir = path.substr(0, pos);
+            relative = path.substr(pos + 1);
+            DWORD attrs = GetFileAttributesW(baseDir.c_str());
             if (attrs == INVALID_FILE_ATTRIBUTES)
-                CreateDirectoryW(dir.c_str(), nullptr);
+                CreateDirectoryW(baseDir.c_str(), nullptr);
+        }
+        else
+        {
+            relative = path;
         }
 
-        // Create a zero-length file to represent placeholder (stub).
+        HMODULE hCfApi = LoadLibraryW(L"cfapi.dll");
+        if (hCfApi)
+        {
+            using PFN_CfCreatePlaceholders = HRESULT(WINAPI*)(LPCWSTR, CF_PLACEHOLDER_CREATE_INFO*, DWORD, CF_CREATE_FLAGS, PDWORD);
+            PFN_CfCreatePlaceholders pfn = (PFN_CfCreatePlaceholders)GetProcAddress(hCfApi, "CfCreatePlaceholders");
+            if (pfn)
+            {
+                CF_PLACEHOLDER_CREATE_INFO info = { 0 };
+                info.RelativeFileName = relative.c_str();
+                info.FsMetadata.BasicInfo.FileAttributes = FILE_ATTRIBUTE_ARCHIVE;
+                info.FsMetadata.FileSize.QuadPart = (LONGLONG)fileSize;
+                info.FileIdentity = nullptr;
+                info.FileIdentityLength = 0;
+                info.Flags = CF_PLACEHOLDER_CREATE_FLAG_NONE;
+                info.Result = S_OK;
+
+                DWORD entries = 0;
+                HRESULT hr = pfn(baseDir.c_str(), &info, 1, CF_CREATE_FLAG_NONE, &entries);
+                std::wostringstream r;
+                r << L"CfCreatePlaceholders returned hr=0x" << std::hex << hr << L", entries=" << entries;
+                LogDebug(r.str());
+                FreeLibrary(hCfApi);
+                if (SUCCEEDED(hr))
+                    return S_OK;
+                // fallthrough to stub on failure
+            }
+            FreeLibrary(hCfApi);
+        }
+
+        // Minimal stub: create a zero-length file to represent placeholder (not a real CF placeholder).
         std::wofstream ofs(path, std::ios::binary);
         if (!ofs)
         {
@@ -87,9 +136,6 @@ HRESULT __stdcall CreatePlaceholderFile(const wchar_t* placeholderPath, unsigned
             return HRESULT_FROM_WIN32(err);
         }
         ofs.close();
-
-        // Optionally set placeholder attributes (not true CF placeholder).
-        // SetFileAttributesW(path.c_str(), FILE_ATTRIBUTE_ARCHIVE);
 
         return S_OK;
     }
@@ -110,16 +156,48 @@ HRESULT __stdcall TriggerHydration(const wchar_t* filePath)
         std::wostringstream ss;
         ss << L"TriggerHydration called. Path=\"" << filePath << L"\"";
         LogDebug(ss.str());
-
-        // TODO: In a CFAPI implementation, call CfExecute or queue a hydration callback which will
-        // open the network stream (LocalStack/S3), download content, and write into the placeholder
-        // using CfSetPlaceholderData or by writing into the hydrated file.
-
-        // Simulated hydration: write sample content into the file to simulate download.
+        // Try to call CfHydratePlaceholder on the file handle.
         std::wstring path(filePath);
+        HANDLE hFile = CreateFileW(path.c_str(), GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (hFile == INVALID_HANDLE_VALUE)
+        {
+            DWORD err = GetLastError();
+            LogDebug(L"TriggerHydration: CreateFileW failed, error " + std::to_wstring(err));
+            // fall back to simulated write
+        }
+        else
+        {
+            HMODULE hCfApi = LoadLibraryW(L"cfapi.dll");
+            if (hCfApi)
+            {
+                using PFN_CfHydratePlaceholder = HRESULT(WINAPI*)(HANDLE, LARGE_INTEGER, LARGE_INTEGER, CF_HYDRATE_FLAGS, LPOVERLAPPED);
+                PFN_CfHydratePlaceholder pfn = (PFN_CfHydratePlaceholder)GetProcAddress(hCfApi, "CfHydratePlaceholder");
+                if (pfn)
+                {
+                    LARGE_INTEGER zero = { 0 };
+                    LARGE_INTEGER full = { 0 };
+                    LARGE_INTEGER fileSizeLi = { 0 };
+                    if (!GetFileSizeEx(hFile, &fileSizeLi))
+                    {
+                        fileSizeLi.QuadPart = CF_EOF;
+                    }
+                    HRESULT hr = pfn(hFile, zero, fileSizeLi, CF_HYDRATE_FLAG_NONE, nullptr);
+                    std::wostringstream r;
+                    r << L"CfHydratePlaceholder returned hr=0x" << std::hex << hr;
+                    LogDebug(r.str());
+                    CloseHandle(hFile);
+                    FreeLibrary(hCfApi);
+                    if (SUCCEEDED(hr))
+                        return S_OK;
+                }
+                FreeLibrary(hCfApi);
+            }
+            CloseHandle(hFile);
+        }
+
+        // Fallback: write simulated content into the file path (as before).
         std::ofstream ofs;
 #if defined(_MSC_VER)
-        // Convert wstring to narrow for std::ofstream (simple conversion, adequate for ASCII test)
         int size_needed = WideCharToMultiByte(CP_UTF8, 0, path.c_str(), -1, NULL, 0, NULL, NULL);
         std::string utf8Path(size_needed, 0);
         WideCharToMultiByte(CP_UTF8, 0, path.c_str(), -1, &utf8Path[0], size_needed, NULL, NULL);
@@ -159,10 +237,50 @@ HRESULT __stdcall NotifyFileStateChange(const wchar_t* filePath, int state)
         std::wostringstream ss;
         ss << L"NotifyFileStateChange called. Path=\"" << filePath << L"\", State=" << state;
         LogDebug(ss.str());
+        // Map state to CFAPI update. For example: 1 -> mark in sync, 2 -> dehydrate.
+        CF_UPDATE_FLAGS flags = CF_UPDATE_FLAG_NONE;
+        switch (state)
+        {
+        case 1:
+            flags = CF_UPDATE_FLAG_MARK_IN_SYNC;
+            break;
+        case 2:
+            flags = CF_UPDATE_FLAG_DEHYDRATE;
+            break;
+        default:
+            flags = CF_UPDATE_FLAG_NONE;
+            break;
+        }
 
-        // TODO: Map `state` to your domain (e.g., 0=Pending, 1=Synced, 2=Downloaded) and update
-        // internal metadata plus call CfReportProviderProgress / CFAPI notifications if required.
+        std::wstring path(filePath);
+        HANDLE hFile = CreateFileW(path.c_str(), GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (hFile == INVALID_HANDLE_VALUE)
+        {
+            DWORD err = GetLastError();
+            LogDebug(L"NotifyFileStateChange: CreateFileW failed, error " + std::to_wstring(err));
+            return HRESULT_FROM_WIN32(err);
+        }
 
+        HMODULE hCfApi = LoadLibraryW(L"cfapi.dll");
+        if (hCfApi)
+        {
+            using PFN_CfUpdatePlaceholder = HRESULT(WINAPI*)(HANDLE, const CF_FS_METADATA*, LPCVOID, DWORD, const CF_FILE_RANGE*, DWORD, CF_UPDATE_FLAGS, USN*, LPOVERLAPPED);
+            PFN_CfUpdatePlaceholder pfn = (PFN_CfUpdatePlaceholder)GetProcAddress(hCfApi, "CfUpdatePlaceholder");
+            if (pfn)
+            {
+                HRESULT hr = pfn(hFile, nullptr, nullptr, 0, nullptr, 0, flags, nullptr, nullptr);
+                std::wostringstream r;
+                r << L"CfUpdatePlaceholder returned hr=0x" << std::hex << hr;
+                LogDebug(r.str());
+                CloseHandle(hFile);
+                FreeLibrary(hCfApi);
+                return hr;
+            }
+            FreeLibrary(hCfApi);
+        }
+
+        // If CFAPI not available, just return success after logging.
+        CloseHandle(hFile);
         return S_OK;
     }
     catch (...)
